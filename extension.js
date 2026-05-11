@@ -17,6 +17,7 @@ import * as Slider from "resource:///org/gnome/shell/ui/slider.js";
 const RUNTIME_DIR_NAME = "open-orpheus";
 const STATE_FILE_NAME = "tray-lyrics.json";
 const CONTROL_FILE_NAME = "tray-lyrics-control.json";
+const FLATPAK_APP_ID = "io.github.yucling.open-orpheus";
 const DEFAULT_STYLE = {
   fontFamily: "",
   color: "",
@@ -40,15 +41,16 @@ const TrayLyricsIndicator = GObject.registerClass(
       super._init(0.0, "Open Orpheus Tray Lyrics");
 
       this._readTimeoutId = 0;
-      this._monitor = null;
-      this._dir = this._getRuntimePath(RUNTIME_DIR_NAME);
-      this._statePath = GLib.build_filenamev([this._dir, STATE_FILE_NAME]);
-      this._controlPath = GLib.build_filenamev([this._dir, CONTROL_FILE_NAME]);
+      this._pendingRuntime = null;
+      this._runtimes = this._getRuntimePaths(RUNTIME_DIR_NAME).map((dir) => ({
+        dir,
+        statePath: GLib.build_filenamev([dir, STATE_FILE_NAME]),
+        controlPath: GLib.build_filenamev([dir, CONTROL_FILE_NAME]),
+        monitor: null,
+      }));
+      this._activeRuntime = this._runtimes[0];
       this._style = { ...DEFAULT_STYLE };
       this._visibleText = "";
-      this._systemFonts = this._loadSystemFonts();
-
-      GLib.mkdir_with_parents(this._dir, 0o700);
 
       this._label = new St.Label({
         style_class: "open-orpheus-tray-lyrics-label",
@@ -71,9 +73,11 @@ const TrayLyricsIndicator = GObject.registerClass(
         GLib.Source.remove(this._readTimeoutId);
         this._readTimeoutId = 0;
       }
-      if (this._monitor) {
-        this._monitor.cancel();
-        this._monitor = null;
+      for (const runtime of this._runtimes) {
+        if (runtime.monitor) {
+          runtime.monitor.cancel();
+          runtime.monitor = null;
+        }
       }
       super.destroy();
     }
@@ -127,14 +131,6 @@ const TrayLyricsIndicator = GObject.registerClass(
         this._refreshStyleEditorState();
       });
 
-      for (const font of this._systemFonts) {
-        menu.addAction(font, () => {
-          this._pendingFontFamily = font;
-          this._refreshStyleEditorState();
-        });
-      }
-
-      menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
       menu.addAction("使用当前样式", () => {
         this._pendingFontFamily = this._style.fontFamily;
         this._refreshStyleEditorState();
@@ -249,38 +245,57 @@ const TrayLyricsIndicator = GObject.registerClass(
     }
 
     _setupMonitor() {
-      const dir = Gio.File.new_for_path(this._dir);
-      this._monitor = dir.monitor_directory(Gio.FileMonitorFlags.NONE, null);
-      this._monitor.connect("changed", (_monitor, file) => {
-        if (file.get_basename() !== STATE_FILE_NAME) return;
-        this._queueReadState();
-      });
+      for (const runtime of this._runtimes) {
+        try {
+          GLib.mkdir_with_parents(runtime.dir, 0o700);
+
+          const dir = Gio.File.new_for_path(runtime.dir);
+          runtime.monitor = dir.monitor_directory(
+            Gio.FileMonitorFlags.NONE,
+            null
+          );
+          runtime.monitor.connect("changed", (_monitor, file) => {
+            if (file.get_basename() !== STATE_FILE_NAME) return;
+            this._queueReadState(runtime);
+          });
+        } catch (error) {
+          logError(error, `Failed to monitor ${runtime.dir}`);
+        }
+      }
     }
 
-    _queueReadState() {
+    _queueReadState(runtime = null) {
+      if (runtime) this._pendingRuntime = runtime;
       if (this._readTimeoutId) return;
 
       this._readTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 30, () => {
         this._readTimeoutId = 0;
-        this._readState();
+        const pendingRuntime = this._pendingRuntime;
+        this._pendingRuntime = null;
+        this._readState(pendingRuntime);
         return GLib.SOURCE_REMOVE;
       });
     }
 
-    _readState() {
-      try {
-        const [ok, bytes] = GLib.file_get_contents(this._statePath);
-        if (!ok) {
-          this._setVisibleText("");
-          return;
-        }
+    _readState(runtime = null) {
+      const runtimes = runtime ? [runtime] : this._getRuntimeReadOrder();
 
-        const state = JSON.parse(new TextDecoder().decode(bytes));
-        this._setStyle(state.style);
-        this._setVisibleText(state.visible ? state.text || "" : "");
-      } catch {
-        this._setVisibleText("");
+      for (const candidate of runtimes) {
+        try {
+          const [ok, bytes] = GLib.file_get_contents(candidate.statePath);
+          if (!ok) continue;
+
+          const state = JSON.parse(new TextDecoder().decode(bytes));
+          this._activeRuntime = candidate;
+          this._setStyle(state.style);
+          this._setVisibleText(state.visible ? state.text || "" : "");
+          return;
+        } catch {
+          // Try the next supported runtime path below.
+        }
       }
+
+      this._setVisibleText("");
     }
 
     _setVisibleText(text) {
@@ -458,32 +473,12 @@ const TrayLyricsIndicator = GObject.registerClass(
         .join("")}`;
     }
 
-    _loadSystemFonts() {
-      try {
-        const [ok, stdout] = GLib.spawn_command_line_sync("fc-list : family");
-        if (!ok) return [];
-
-        const fonts = new Set();
-        const lines = new TextDecoder().decode(stdout).split("\n");
-        for (const line of lines) {
-          for (const family of line.split(",")) {
-            const font = family.trim();
-            if (font) fonts.add(font);
-          }
-        }
-
-        return [...fonts].sort((a, b) => a.localeCompare(b));
-      } catch (error) {
-        logError(error, "Failed to load system fonts for tray lyrics");
-        return [];
-      }
-    }
-
     _writeControl(control) {
       try {
-        GLib.mkdir_with_parents(this._dir, 0o700);
+        const runtime = this._activeRuntime || this._runtimes[0];
+        GLib.mkdir_with_parents(runtime.dir, 0o700);
         GLib.file_set_contents(
-          this._controlPath,
+          runtime.controlPath,
           `${JSON.stringify(control)}\n`
         );
       } catch (error) {
@@ -491,9 +486,35 @@ const TrayLyricsIndicator = GObject.registerClass(
       }
     }
 
-    _getRuntimePath(name) {
+    _getRuntimeReadOrder() {
+      return [...this._runtimes].sort(
+        (a, b) =>
+          this._getRuntimeModifiedUsec(b) - this._getRuntimeModifiedUsec(a)
+      );
+    }
+
+    _getRuntimeModifiedUsec(runtime) {
+      try {
+        const info = Gio.File.new_for_path(runtime.statePath).query_info(
+          "time::modified,time::modified-usec",
+          Gio.FileQueryInfoFlags.NONE,
+          null
+        );
+        return (
+          info.get_attribute_uint64("time::modified") * 1000000 +
+          info.get_attribute_uint32("time::modified-usec")
+        );
+      } catch {
+        return -1;
+      }
+    }
+
+    _getRuntimePaths(name) {
       const runtimeDir = GLib.getenv("XDG_RUNTIME_DIR") || GLib.get_tmp_dir();
-      return GLib.build_filenamev([runtimeDir, name]);
+      return [
+        GLib.build_filenamev([runtimeDir, name]),
+        GLib.build_filenamev([runtimeDir, "app", FLATPAK_APP_ID, name]),
+      ];
     }
   }
 );
