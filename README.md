@@ -1,6 +1,6 @@
 # Open Orpheus Tray Lyrics
 
-GNOME Shell extension for showing [Open Orpheus](https://github.com/myouo/open-orpheus) lyrics in the GNOME top panel.
+GNOME Shell extension for showing [Open Orpheus](https://github.com/YUCLing/open-orpheus) lyrics in the GNOME top panel.
 
 This extension is an Open Orpheus companion plugin. It reads the current lyrics state written by Open Orpheus and renders the text directly in the GNOME top panel.
 
