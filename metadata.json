@@ -1,0 +1,8 @@
+{
+  "uuid": "open-orpheus-tray-lyrics@open-orpheus",
+  "name": "Open Orpheus Tray Lyrics",
+  "description": "Show Open Orpheus lyrics in the GNOME top panel.",
+  "url": "https://github.com/myouo/open-orpheus-tray-lyrics",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "version": 3
+}
